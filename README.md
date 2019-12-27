@@ -16,4 +16,4 @@ SERVERS = _YOUR_SERVER_IPs
 
 3. Move ```gpuall``` to your PATH
 
-4. Enjoy~
+4. Run ```gpuall``` in terminal, enjoy~
