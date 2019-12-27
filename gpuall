@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+
+import os
+# import subprocess
+import _thread as thread
+import threading
+import time
+
+USER = 'jianfei'
+SERVERS = ['172.18.167.31', '172.18.167.15', '172.18.167.16', '172.18.167.97']
+
+def color(color, str):
+	c = {}
+	c['nocolor']='\033[0m'
+	c['red']='\033[0;31m'
+	c['green']='\033[0;32m'
+	c['orange']='\033[0;33m'
+	c['blue']='\033[0;34m'
+	c['purple']='\033[0;35m'
+	c['cyan']='\033[0;36m'
+	c['lgray']='\033[0;37m'
+	c['darygray']='\033[1;30m'
+	c['lred']='\033[1;31m'
+	c['lgreen']='\033[1;32m'
+	c['yellow']='\033[1;33m'
+	c['lblue']='\033[1;34m'
+	c['lpurple']='\033[1;35m'
+	c['lcyan']='\033[1;36m'
+	c['white']='\033[1;37m'
+	# for k in c:
+	# 	print (c[k]+k+c['nocolor'])
+	return c[color]+str+c['nocolor']
+
+def get_gpu_status(server):
+	command = 'nvidia-smi --query-gpu=gpu_uuid,index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader'
+	res = os.popen('ssh {}@{} {}'.format(USER, server, command)).readlines()
+	gpu_dics = {}
+	for gpu in res:
+		status = [s.strip() for s in gpu.split(',')]
+		gpu_dics[status[0]] = {
+			"index": status[1],
+			"name": status[2],
+			"m.used": status[3],
+			"m.total": status[4],
+			"util": status[5],
+			"T": status[6],
+			"process": []
+		}
+	return gpu_dics
+
+def get_process_mem(server, pid_list):
+	command = 'nvidia-smi -q -d PIDS | grep -A3'
+	for pid in pid_list:
+		command += ' -e {}'.format(pid)
+	run = 'ssh {}@{} "{}"'.format(USER, server, command)
+	# print(run)
+	res = os.popen(run).readlines()
+	mem_dict = {}
+	for i in range(len(res)):
+		if ('Process ID' in res[i]):
+			pid = res[i].split(':')[1].strip()
+			mem = res[i+3].split(':')[1].strip()
+			mem_dict[pid] = mem
+	return mem_dict
+
+def get_process_user(server, pid_list):
+	command = 'ps -A -o pid,user | grep'
+	for pid in pid_list:
+		command += ' -e {}'.format(pid)
+	res = os.popen('ssh {}@{} {}'.format(USER, server, command)).readlines()
+	user_dict = {}
+	for k in range(len(res)):
+		res[k] = res[k].strip()
+	for k in range(len(res)):
+		if (res[k].split(' ')[0].strip() in pid_list):
+			pid = res[k].split(' ')[0].strip()
+			user = res[k].split(' ')[1].strip()
+			user_dict[pid]=user
+	return user_dict
+
+def get_process_status(server):
+	command1 = 'nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv,noheader'
+	command2 = 'ps -o user= -p'
+	# ps -A -o pid,user
+	res = os.popen('ssh {}@{} {}'.format(USER, server, command1)).readlines()
+	process_dics = {}
+	pid_list = []
+	for process in res:
+		status = [s.strip() for s in process.split(',')]
+		pid_list.append(status[1])
+	process_mems = get_process_mem(server, pid_list)
+	process_users = get_process_user(server, pid_list)
+	for process in res:
+		status = [s.strip() for s in process.split(',')]
+		if (status[0] not in process_dics):
+			process_dics[status[0]] = []
+		process_dics[status[0]].append({
+			"pid": status[1],
+			"pname": status[2],
+			"user": process_users[status[1]],
+			"mem": process_mems[status[1]]
+		})
+	return process_dics
+
+def get_server_status(server):
+	gpulist = get_gpu_status(server)
+	processlist = get_process_status(server)
+	for k in processlist:
+		for p in processlist[k]:
+			gpulist[k]['process'].append(p)
+	return gpulist
+
+def digit(string):
+	return int(''.join(list(filter(str.isdigit, string))))
+
+def format_id_name(id, name):
+	return ('[{}]'.format(id)+color('cyan', name.center(26)))
+
+def format_temp_util(T, util):
+	T = digit(T)
+	util = digit(util)
+	if T < 50:
+		format_T = color('lgreen', "{}'C".format(T))
+	elif T < 70:
+		format_T = color('orange', "{}'C".format(T))
+	else:
+		format_T = color('lred', "{}'C".format(T))
+
+	if util < 40:
+		format_util = color('lgreen', "{}".format(util).ljust(3)+"%")
+	elif util < 80:
+		format_util = color('orange', "{}".format(util).ljust(3)+"%")
+	else:
+		format_util = color('lred', "{}".format(util).ljust(3)+"%")
+
+	return (format_T+",  "+format_util)
+
+def format_mem(used, total):
+	used = digit(used)
+	total = digit(total)
+	if float(used)/total < 0.3:
+		format_used = color('lgreen', "{}".format(used).rjust(5))
+	elif float(used)/total < 0.7:
+		format_used = color('orange', "{}".format(used).rjust(5))
+	else:
+		format_used = color('lred', "{}".format(used).rjust(5))
+
+	return (format_used+' / '+color('lcyan', "{}".format(total).rjust(5))+' MB')
+
+def format_process(p):
+	pid = color('yellow', p['pid'].rjust(6))
+	pname = color('yellow', p['pname'].ljust(30))
+	user = color('lblue', p['user'].rjust(10))
+	mem = digit(p['mem'])
+	mem = color('lred', "{}".format(mem).rjust(5)+' MB')
+	return ('    * ' + pid + ' : ' + pname + ' | ' + user + ' > ' + mem)
+
+def show(info):
+	for k in info:
+		gpu = info[k]
+		id_name = format_id_name(gpu['index'], gpu['name'])
+		temp_util = format_temp_util(gpu['T'], gpu['util'])
+		mem = format_mem(gpu['m.used'], gpu['m.total'])
+		print('  ' + id_name + ' | '+ temp_util + ' | ' + mem)
+		if len(gpu['process']) == 0:
+			print('    * ' + color('lgreen', 'No Process Running!'))
+		for p in gpu['process']:
+			print(format_process(p))
+
+def fetch(ip):
+        # print('ip: '+time.time())
+        info = get_server_status(ip)
+        print(ip+' :')
+        show(info)
+
+class handler(threading.Thread):
+        def __init__(self, threadID, ip):
+                threading.Thread.__init__(self)
+                self.threadID = threadID
+                self.ip = ip
+        def run(self):
+                fetch(self.ip)
+
+if __name__ == '__main__':
+        fetch_threads = []
+        id = 0
+        for server in SERVERS:
+                # info = get_server_status(server)
+                # print(server+' :')
+                # show(info)
+                fetch_threads.append(handler(id, server))
+                id += 1
+
+        for th in fetch_threads:
+                th.start()
